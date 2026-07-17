@@ -5,38 +5,143 @@
  * Regla de oro: TODA función pública arranca con getAuthUserId(ctx)
  * y falla/devuelve vacío si es null.
  */
-// import { v } from "convex/values";
-// import { paginationOptsValidator } from "convex/server";
-// import { mutation, query, internalMutation, internalQuery } from "./_generated/server";
-// import { internal } from "./_generated/api";
-// import { getAuthUserId } from "@convex-dev/auth/server";
+import { v } from "convex/values";
+import { paginationOptsValidator } from "convex/server";
+import { mutation, query, internalMutation, internalQuery } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { getAuthUserId } from "@convex-dev/auth/server";
 
 // ---------- públicas (las llama el frontend) ----------
 
-// TODO 1: generateUploadUrl (mutation sin args)
-//         → auth check + return ctx.storage.generateUploadUrl()
+export const generateUploadUrl = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("No autenticado");
+    return await ctx.storage.generateUploadUrl();
+  },
+});
 
-// TODO 2: createReceipt (mutation: storageId, fileName, mimeType, fileSize)
-//         → insert con status "pending"
-//         → ctx.scheduler.runAfter(0, internal.gemini.processReceipt, { receiptId })  ← LA COLA
+export const createReceipt = mutation({
+  args: {
+    storageId: v.id("_storage"),
+    fileName: v.string(),
+    mimeType: v.string(),
+    fileSize: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("No autenticado");
+    const receiptId = await ctx.db.insert("receipts", {
+      userId,
+      ...args,
+      status: "pending",
+    });
+    // LA COLA: agenda el procesamiento en background y responde ya
+    await ctx.scheduler.runAfter(0, internal.gemini.processReceipt, { receiptId });
+    return receiptId;
+  },
+});
 
-// TODO 3: list (query paginada con paginationOptsValidator)
-//         → withIndex("by_user").order("desc").paginate(...)
-//         → enriquecer cada item con url: await ctx.storage.getUrl(storageId)
+export const list = query({
+  args: { paginationOpts: paginationOptsValidator },
+  handler: async (ctx, { paginationOpts }) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return { page: [], isDone: true, continueCursor: "" };
+    const result = await ctx.db
+      .query("receipts")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .order("desc")
+      .paginate(paginationOpts);
+    // enriquecer con la URL del archivo para thumbnails
+    return {
+      ...result,
+      page: await Promise.all(
+        result.page.map(async (r) => ({
+          ...r,
+          url: await ctx.storage.getUrl(r.storageId),
+        }))
+      ),
+    };
+  },
+});
 
-// TODO 4: get (query: id) → ownership check (doc.userId === userId) o null
+export const get = query({
+  args: { id: v.id("receipts") },
+  handler: async (ctx, { id }) => {
+    const userId = await getAuthUserId(ctx);
+    const doc = await ctx.db.get(id);
+    if (!doc || doc.userId !== userId) return null; // ownership check
+    return { ...doc, url: await ctx.storage.getUrl(doc.storageId) };
+  },
+});
 
-// TODO 5: listByRange (query: start, end en ms)
-//         → withIndex("by_user", q => q.eq(...).gte("_creationTime", start).lt("_creationTime", end))
-//         → .collect()
+export const listByRange = query({
+  args: { start: v.number(), end: v.number() }, // timestamps ms (fecha de escaneo)
+  handler: async (ctx, { start, end }) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return [];
+    return await ctx.db
+      .query("receipts")
+      .withIndex("by_user", (q) =>
+        q.eq("userId", userId).gte("_creationTime", start).lt("_creationTime", end)
+      )
+      .collect();
+  },
+});
 
-// TODO 6: remove (mutation: id) → ownership check + storage.delete + db.delete
+export const remove = mutation({
+  args: { id: v.id("receipts") },
+  handler: async (ctx, { id }) => {
+    const userId = await getAuthUserId(ctx);
+    const doc = await ctx.db.get(id);
+    if (!doc || doc.userId !== userId) throw new Error("No encontrado");
+    await ctx.storage.delete(doc.storageId);
+    await ctx.db.delete(id);
+  },
+});
 
 // ---------- internas (solo las usa convex/gemini.ts) ----------
 
-// TODO 7: getInternal (internalQuery: id) → ctx.db.get(id)
-// TODO 8: markProcessing (internalMutation: id) → patch status "processing"
-// TODO 9: saveExtraction (internalMutation: id + campos opcionales) → patch campos + status "done"
-// TODO 10: markFailed (internalMutation: id, status error|not_a_receipt, errorMessage?, rawExtraction?)
+export const getInternal = internalQuery({
+  args: { id: v.id("receipts") },
+  handler: (ctx, { id }) => ctx.db.get(id),
+});
 
-export {};
+export const markProcessing = internalMutation({
+  args: { id: v.id("receipts") },
+  handler: async (ctx, { id }) => {
+    await ctx.db.patch(id, { status: "processing" });
+  },
+});
+
+export const saveExtraction = internalMutation({
+  args: {
+    id: v.id("receipts"),
+    documentType: v.optional(v.string()),
+    proveedor: v.optional(v.string()),
+    cuit: v.optional(v.string()),
+    fecha: v.optional(v.string()),
+    fechaTs: v.optional(v.number()),
+    numeroFactura: v.optional(v.string()),
+    total: v.optional(v.number()),
+    iva: v.optional(v.number()),
+    documento: v.optional(v.number()),
+    rawExtraction: v.optional(v.string()),
+  },
+  handler: async (ctx, { id, ...fields }) => {
+    await ctx.db.patch(id, { ...fields, status: "done" });
+  },
+});
+
+export const markFailed = internalMutation({
+  args: {
+    id: v.id("receipts"),
+    status: v.union(v.literal("error"), v.literal("not_a_receipt")),
+    errorMessage: v.optional(v.string()),
+    rawExtraction: v.optional(v.string()),
+  },
+  handler: async (ctx, { id, ...fields }) => {
+    await ctx.db.patch(id, fields);
+  },
+});
