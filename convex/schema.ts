@@ -4,13 +4,11 @@
  */
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
-import { authTables } from "@convex-dev/auth/server";
 
+// NOTA: sin auth por ahora — cuando se agregue Convex Auth, volver a poner
+// authTables, el campo userId y los índices por usuario.
 export default defineSchema({
-  ...authTables, // users, authSessions, authAccounts... (las necesita Convex Auth)
-
   receipts: defineTable({
-    userId: v.id("users"),
     storageId: v.id("_storage"),
     fileName: v.string(),
     mimeType: v.string(),
@@ -37,7 +35,5 @@ export default defineSchema({
 
     rawExtraction: v.optional(v.string()), // JSON crudo de Gemini (auditoría/debug)
     errorMessage: v.optional(v.string()),
-  })
-    .index("by_user", ["userId"])                     // + _creationTime implícito → "hoy"
-    .index("by_user_fechaTs", ["userId", "fechaTs"]), // rangos por fecha del documento
+  }).index("by_fechaTs", ["fechaTs"]), // rangos por fecha del documento
 });

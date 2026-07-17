@@ -2,22 +2,20 @@
  * FASE B — Mutations y queries de comprobantes
  * Guía: docs/GUIA-FASE-B-CONVEX.md (§4)
  *
- * Regla de oro: TODA función pública arranca con getAuthUserId(ctx)
- * y falla/devuelve vacío si es null.
+ * NOTA: versión SIN auth (modo desarrollo). Cuando se agregue Convex Auth,
+ * volver a poner getAuthUserId al inicio de cada función pública y el
+ * filtro por userId en las queries.
  */
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { mutation, query, internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { getAuthUserId } from "@convex-dev/auth/server";
 
 // ---------- públicas (las llama el frontend) ----------
 
 export const generateUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) throw new Error("No autenticado");
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -30,10 +28,7 @@ export const createReceipt = mutation({
     fileSize: v.number(),
   },
   handler: async (ctx, args) => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) throw new Error("No autenticado");
     const receiptId = await ctx.db.insert("receipts", {
-      userId,
       ...args,
       status: "pending",
     });
@@ -46,11 +41,8 @@ export const createReceipt = mutation({
 export const list = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, { paginationOpts }) => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) return { page: [], isDone: true, continueCursor: "" };
     const result = await ctx.db
       .query("receipts")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
       .order("desc")
       .paginate(paginationOpts);
     // enriquecer con la URL del archivo para thumbnails
@@ -69,9 +61,8 @@ export const list = query({
 export const get = query({
   args: { id: v.id("receipts") },
   handler: async (ctx, { id }) => {
-    const userId = await getAuthUserId(ctx);
     const doc = await ctx.db.get(id);
-    if (!doc || doc.userId !== userId) return null; // ownership check
+    if (!doc) return null;
     return { ...doc, url: await ctx.storage.getUrl(doc.storageId) };
   },
 });
@@ -79,12 +70,13 @@ export const get = query({
 export const listByRange = query({
   args: { start: v.number(), end: v.number() }, // timestamps ms (fecha de escaneo)
   handler: async (ctx, { start, end }) => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) return [];
     return await ctx.db
       .query("receipts")
-      .withIndex("by_user", (q) =>
-        q.eq("userId", userId).gte("_creationTime", start).lt("_creationTime", end)
+      .filter((q) =>
+        q.and(
+          q.gte(q.field("_creationTime"), start),
+          q.lt(q.field("_creationTime"), end)
+        )
       )
       .collect();
   },
@@ -93,9 +85,8 @@ export const listByRange = query({
 export const remove = mutation({
   args: { id: v.id("receipts") },
   handler: async (ctx, { id }) => {
-    const userId = await getAuthUserId(ctx);
     const doc = await ctx.db.get(id);
-    if (!doc || doc.userId !== userId) throw new Error("No encontrado");
+    if (!doc) throw new Error("No encontrado");
     await ctx.storage.delete(doc.storageId);
     await ctx.db.delete(id);
   },
