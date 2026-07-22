@@ -27,6 +27,8 @@ export default function Capture({ onDone }: { onDone: () => void }) {
 
   // Cola SECUENCIAL: un archivo detrás del otro (mismo patrón que Fase C original)
   async function handleFiles(files: FileList | File[]) {
+    console.log("handleFiles", files);
+    console.log("Array.from(files)", Array.from(files));
     setBusy(true);
     for (const file of Array.from(files)) {
       const qid = crypto.randomUUID();
@@ -34,24 +36,37 @@ export default function Capture({ onDone }: { onDone: () => void }) {
 
       try {
         const validation = await validateFile(file);
+        console.log("validation", validation);
         if (!validation.ok) {
           updateQueue(qid, { state: "rechazado", reason: validation.reason });
           continue;
         }
 
+        console.log("validation.kind", validation.kind);
         let toProcess = file;
         if (validation.kind === "image") {
           updateQueue(qid, { state: "comprimiendo" });
           toProcess = await compressImage(file);
         }
 
+        console.log("toProcess", toProcess);
         const receiptId = addReceipt(toProcess);
+        console.log("receiptId", receiptId);
         updateReceipt(receiptId, { status: "processing" });
         updateQueue(qid, { state: "analizando" });
 
         try {
           const result = await extractReceipt(toProcess);
+          console.log("result.isInvoice", result.isInvoice);
+          console.log("result.documentType", result.documentType);
+          console.log("result.data.proveedor", result.data?.proveedor);
+          console.log("result.data.cuit", result.data?.cuit);
+          console.log("result.data.fecha", result.data?.fecha);
+          console.log("result.data.numeroFactura", result.data?.numeroFactura);
+          console.log("result.data.total", result.data?.total);
+          console.log("result.data.iva", result.data?.iva);
           if (result.isInvoice && result.data) {
+            console.log("result.data", result.data);
             updateReceipt(receiptId, {
               status: "done",
               documentType: result.documentType,
